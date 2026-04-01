@@ -16,6 +16,7 @@ import {
   Anchor
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { supabase } from './lib/supabase';
 
 import { 
   Priority, 
@@ -41,51 +42,86 @@ const PROJECT_COLORS = [
 ];
 
 export default function App() {
-  const [projects, setProjects] = useState<Project[]>(() => {
-    const saved = localStorage.getItem('ideaflow_projects_v5');
-    if (saved) {
+const [projects, setProjects] = useState<Project[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [isLoaded, setIsLoaded] = useState(false);
+
+  useEffect(() => {
+    // 1. Initial Fetch
+    const fetchData = async () => {
+      const { data, error } = await supabase.from('wog_app_state').select('*').eq('id', 1).single();
+      
+      let finalProjects: Project[] = [];
+      let finalTasks: Task[] = [];
+      let needsMigration = false;
+
+      // Check if we have valuable data in localStorage that hasn't been migrated yet
+      const localProjectsString = localStorage.getItem('ideaflow_projects_v5');
+      const localTasksString = localStorage.getItem('ideaflow_tasks_v5');
+      
+      let localProjects: Project[] = [];
+      let localTasks: Task[] = [];
+      
       try {
-        const parsed = JSON.parse(saved);
-        // Ensure subMilestones exists on all stages
-        return parsed.map((p: any) => ({
-          ...p,
-          stages: (p.stages || []).map((s: any) => ({
-            ...s,
-            subMilestones: s.subMilestones || []
-          }))
-        }));
+        if (localProjectsString) localProjects = JSON.parse(localProjectsString);
+        if (localTasksString) localTasks = JSON.parse(localTasksString);
       } catch (e) {
-        console.error("Failed to parse projects from localStorage", e);
+        console.error("Local storage decode error", e);
       }
-    }
-    
-    return [{ 
-      id: 'inbox', 
-      name: 'Inbox', 
-      color: '#6B7280',
-      stages: DEFAULT_STAGES,
-      axes: DEFAULT_AXES,
-      checklists: [],
-      kpis: [],
-      problemLog: []
-    }];
-  });
-  
-  const [tasks, setTasks] = useState<Task[]>(() => {
-    const saved = localStorage.getItem('ideaflow_tasks_v5');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        return parsed.map((t: any) => ({
-          ...t,
-          subMilestoneId: t.subMilestoneId || ''
-        }));
-      } catch (e) {
-        console.error("Failed to parse tasks from localStorage", e);
+
+      // If Supabase has data, what do we do?
+      // Check if Supabase is essentially empty (only 0 or 1 projects, and it's the Inbox)
+      const isSupabaseEmpty = !data || !data.projects || data.projects.length === 0 || 
+                              (data.projects.length === 1 && data.projects[0].id === 'inbox');
+                              
+      const hasValuableLocalData = localProjects.length > 1; // More than just Inbox
+
+      if (isSupabaseEmpty && hasValuableLocalData) {
+        // MIGRATION SCENARIO: Upload local data to Supabase
+        console.log("Migrating local data to Supabase!");
+        finalProjects = localProjects;
+        finalTasks = localTasks;
+        needsMigration = true;
+      } else if (!error && data) {
+        // NORMAL SCENARIO: Supabase has our real data
+        finalProjects = data.projects || [];
+        finalTasks = data.tasks || [];
+      } else {
+        // FALLBACK: Completely empty
+        finalProjects = localProjects.length > 0 ? localProjects : [{ 
+          id: 'inbox', name: 'Inbox', color: '#6B7280', stages: DEFAULT_STAGES, axes: DEFAULT_AXES, checklists: [], kpis: [], problemLog: [] 
+        }];
+        finalTasks = localTasks;
+        needsMigration = true;
       }
-    }
-    return [];
-  });
+
+      setProjects(finalProjects);
+      setTasks(finalTasks);
+
+      if (needsMigration) {
+        await supabase.from('wog_app_state').update({
+          projects: finalProjects,
+          tasks: finalTasks,
+          updated_at: new Date().toISOString()
+        }).eq('id', 1);
+      }
+      setIsLoaded(true);
+    };
+    fetchData();
+
+    // 2. Subscribe to remote changes
+    const channel = supabase
+      .channel('wog_state_changes')
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'wog_app_state', filter: 'id=eq.1' }, (payload) => {
+        if (payload.new) {
+          setProjects(payload.new.projects || []);
+          setTasks(payload.new.tasks || []);
+        }
+      })
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, []);
 
   const [viewMode, setViewMode] = useState<'list' | 'map' | 'dashboard' | 'focus'>('map');
   const [isCompactView, setIsCompactView] = useState(false);
@@ -167,13 +203,26 @@ export default function App() {
     return tasks.filter(t => t.stageId === nextStage.id && t.projectId === currentProject.id).length;
   }, [stages, tasks, currentStageIndex, currentProject.id]);
 
+  // Save to Supabase whenever projects or tasks change
   useEffect(() => {
+    if (!isLoaded) return;
+    
+    // Also save to local storage as a quick backup
     localStorage.setItem('ideaflow_projects_v5', JSON.stringify(projects));
-  }, [projects]);
-
-  useEffect(() => {
     localStorage.setItem('ideaflow_tasks_v5', JSON.stringify(tasks));
-  }, [tasks]);
+    
+    const saveState = async () => {
+      await supabase.from('wog_app_state').update({
+        projects,
+        tasks,
+        updated_at: new Date().toISOString()
+      }).eq('id', 1);
+    };
+    
+    // Debounce to prevent slamming the database on every keystroke
+    const timeout = setTimeout(saveState, 500);
+    return () => clearTimeout(timeout);
+  }, [projects, tasks, isLoaded]);
 
   const addTask = (e: React.FormEvent) => {
     e.preventDefault();

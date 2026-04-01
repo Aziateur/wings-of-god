@@ -1,0 +1,19 @@
+{
+  "name": "wog-mcp",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "npx tsx index.ts",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.6.0",
+    "@supabase/supabase-js": "^2.49.1",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.15",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
