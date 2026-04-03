@@ -37,6 +37,17 @@ import { DashboardView } from './components/DashboardView';
 import { FocusView } from './components/FocusView';
 import { MapView } from './components/MapView';
 
+const FALLBACK_PROJECT: Project = {
+  id: 'inbox',
+  name: 'Inbox',
+  color: '#6B7280',
+  stages: DEFAULT_STAGES,
+  axes: DEFAULT_AXES,
+  checklists: [],
+  kpis: [],
+  problemLog: []
+};
+
 const PROJECT_COLORS = [
   '#3B82F6', '#EF4444', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899', '#6366F1'
 ];
@@ -132,12 +143,12 @@ const [projects, setProjects] = useState<Project[]>([]);
   const [selectedStatus, setSelectedStatus] = useState<TaskStatus>('execute');
   
   const currentProject = useMemo(() => {
-    const proj = projects.find(p => p.id === (activeProjectId === 'all' ? 'inbox' : activeProjectId)) || projects[0];
-    return proj;
+    if (projects.length === 0) return FALLBACK_PROJECT;
+    return projects.find(p => p.id === (activeProjectId === 'all' ? 'inbox' : activeProjectId)) || projects[0] || FALLBACK_PROJECT;
   }, [projects, activeProjectId]);
 
-  const stages = currentProject.stages || DEFAULT_STAGES;
-  const axes = currentProject.axes || DEFAULT_AXES;
+  const stages = currentProject?.stages || DEFAULT_STAGES;
+  const axes = currentProject?.axes || DEFAULT_AXES;
 
   const [selectedStageId, setSelectedStageId] = useState(stages[0]?.id || '');
   const [selectedSubMilestoneId, setSelectedSubMilestoneId] = useState('');
