@@ -18,10 +18,23 @@ const server = new Server(
   { capabilities: { tools: {} } }
 );
 
+// Defensively parse a value that might be a string or an actual array/object
+function safeParse(val: any): any {
+  if (typeof val === 'string') {
+    try { return JSON.parse(val); } catch { return []; }
+  }
+  return val ?? [];
+}
+
 async function getState() {
   const { data, error } = await supabase.from('wog_app_state').select('*').eq('id', 1).single();
   if (error) throw error;
-  return data;
+  // Always normalize to prevent double-serialization issues
+  return {
+    ...data,
+    projects: safeParse(data.projects),
+    tasks: safeParse(data.tasks),
+  };
 }
 
 async function saveState(projects: any, tasks: any) {
