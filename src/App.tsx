@@ -16,7 +16,7 @@ import {
   Anchor
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { supabase } from './lib/supabase';
+import { supabase, hasCredentials } from './lib/supabase';
 
 import { 
   Priority, 
@@ -52,81 +52,88 @@ const PROJECT_COLORS = [
   '#3B82F6', '#EF4444', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899', '#6366F1'
 ];
 
+// Helper: safely load from localStorage
+function loadFromLocalStorage(): { projects: Project[]; tasks: Task[] } {
+  let projects: Project[] = [];
+  let tasks: Task[] = [];
+  try {
+    const savedProjects = localStorage.getItem('ideaflow_projects_v5');
+    const savedTasks = localStorage.getItem('ideaflow_tasks_v5');
+    if (savedProjects) projects = JSON.parse(savedProjects);
+    if (savedTasks) tasks = JSON.parse(savedTasks);
+  } catch (e) {
+    console.error("localStorage parse error:", e);
+  }
+  if (projects.length === 0) projects = [FALLBACK_PROJECT];
+  return { projects, tasks };
+}
+
 export default function App() {
-const [projects, setProjects] = useState<Project[]>([]);
+const [projects, setProjects] = useState<Project[]>([FALLBACK_PROJECT]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [isLoaded, setIsLoaded] = useState(false);
 
   useEffect(() => {
-    // 1. Initial Fetch
     const fetchData = async () => {
-      const { data, error } = await supabase.from('wog_app_state').select('*').eq('id', 1).single();
-      
-      let finalProjects: Project[] = [];
-      let finalTasks: Task[] = [];
-      let needsMigration = false;
+      // Always start with localStorage data so the UI renders immediately
+      const local = loadFromLocalStorage();
+      let finalProjects = local.projects;
+      let finalTasks = local.tasks;
 
-      // Check if we have valuable data in localStorage that hasn't been migrated yet
-      const localProjectsString = localStorage.getItem('ideaflow_projects_v5');
-      const localTasksString = localStorage.getItem('ideaflow_tasks_v5');
-      
-      let localProjects: Project[] = [];
-      let localTasks: Task[] = [];
-      
-      try {
-        if (localProjectsString) localProjects = JSON.parse(localProjectsString);
-        if (localTasksString) localTasks = JSON.parse(localTasksString);
-      } catch (e) {
-        console.error("Local storage decode error", e);
-      }
+      // Only try Supabase if credentials are configured
+      if (hasCredentials) {
+        try {
+          const { data, error } = await supabase.from('wog_app_state').select('*').eq('id', 1).single();
+          
+          if (!error && data) {
+            // Parse in case of double-serialization
+            const sbProjects = typeof data.projects === 'string' ? JSON.parse(data.projects) : (data.projects || []);
+            const sbTasks = typeof data.tasks === 'string' ? JSON.parse(data.tasks) : (data.tasks || []);
+            
+            const isSupabaseEmpty = sbProjects.length === 0 || 
+                                    (sbProjects.length === 1 && sbProjects[0]?.id === 'inbox' && sbTasks.length === 0);
+            const hasValuableLocalData = local.projects.length > 1 || local.tasks.length > 0;
 
-      // If Supabase has data, what do we do?
-      // Check if Supabase is essentially empty (only 0 or 1 projects, and it's the Inbox)
-      const isSupabaseEmpty = !data || !data.projects || data.projects.length === 0 || 
-                              (data.projects.length === 1 && data.projects[0].id === 'inbox');
-                              
-      const hasValuableLocalData = localProjects.length > 1; // More than just Inbox
-
-      if (isSupabaseEmpty && hasValuableLocalData) {
-        // MIGRATION SCENARIO: Upload local data to Supabase
-        console.log("Migrating local data to Supabase!");
-        finalProjects = localProjects;
-        finalTasks = localTasks;
-        needsMigration = true;
-      } else if (!error && data) {
-        // NORMAL SCENARIO: Supabase has our real data
-        finalProjects = data.projects || [];
-        finalTasks = data.tasks || [];
-      } else {
-        // FALLBACK: Completely empty
-        finalProjects = localProjects.length > 0 ? localProjects : [{ 
-          id: 'inbox', name: 'Inbox', color: '#6B7280', stages: DEFAULT_STAGES, axes: DEFAULT_AXES, checklists: [], kpis: [], problemLog: [] 
-        }];
-        finalTasks = localTasks;
-        needsMigration = true;
+            if (isSupabaseEmpty && hasValuableLocalData) {
+              // Migrate local → Supabase
+              console.log("Migrating local data to Supabase!");
+              await supabase.from('wog_app_state').update({
+                projects: local.projects,
+                tasks: local.tasks,
+                updated_at: new Date().toISOString()
+              }).eq('id', 1);
+            } else if (sbProjects.length > 0) {
+              // Use Supabase data
+              finalProjects = sbProjects;
+              finalTasks = sbTasks;
+            }
+          }
+        } catch (e) {
+          console.warn("Supabase fetch failed, using localStorage:", e);
+        }
       }
 
       setProjects(finalProjects);
       setTasks(finalTasks);
-
-      if (needsMigration) {
-        await supabase.from('wog_app_state').update({
-          projects: finalProjects,
-          tasks: finalTasks,
-          updated_at: new Date().toISOString()
-        }).eq('id', 1);
-      }
       setIsLoaded(true);
     };
     fetchData();
 
-    // 2. Subscribe to remote changes
+    // Only subscribe to realtime if credentials exist
+    if (!hasCredentials) return;
+
     const channel = supabase
       .channel('wog_state_changes')
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'wog_app_state', filter: 'id=eq.1' }, (payload) => {
         if (payload.new) {
-          setProjects(payload.new.projects || []);
-          setTasks(payload.new.tasks || []);
+          try {
+            const p = typeof payload.new.projects === 'string' ? JSON.parse(payload.new.projects) : (payload.new.projects || []);
+            const t = typeof payload.new.tasks === 'string' ? JSON.parse(payload.new.tasks) : (payload.new.tasks || []);
+            if (p.length > 0) setProjects(p);
+            setTasks(t);
+          } catch (e) {
+            console.warn("Realtime parse error:", e);
+          }
         }
       })
       .subscribe();
@@ -218,19 +225,25 @@ const [projects, setProjects] = useState<Project[]>([]);
   useEffect(() => {
     if (!isLoaded) return;
     
-    // Also save to local storage as a quick backup
+    // Always save to localStorage
     localStorage.setItem('ideaflow_projects_v5', JSON.stringify(projects));
     localStorage.setItem('ideaflow_tasks_v5', JSON.stringify(tasks));
     
+    // Only sync to Supabase if credentials exist
+    if (!hasCredentials) return;
+    
     const saveState = async () => {
-      await supabase.from('wog_app_state').update({
-        projects,
-        tasks,
-        updated_at: new Date().toISOString()
-      }).eq('id', 1);
+      try {
+        await supabase.from('wog_app_state').update({
+          projects,
+          tasks,
+          updated_at: new Date().toISOString()
+        }).eq('id', 1);
+      } catch (e) {
+        console.warn("Supabase save failed:", e);
+      }
     };
     
-    // Debounce to prevent slamming the database on every keystroke
     const timeout = setTimeout(saveState, 500);
     return () => clearTimeout(timeout);
   }, [projects, tasks, isLoaded]);
